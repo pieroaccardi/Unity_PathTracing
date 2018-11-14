@@ -1,0 +1,86 @@
+﻿#pragma kernel cells_counting
+#pragma kernel cells_overlapping
+
+struct CS_INPUT
+{
+	uint3 Gid : SV_GroupID;
+	uint3 GTid : SV_GroupThreadID;
+	uint3 DTid : SV_DispatchThreadID;
+	uint GI : SV_GroupIndex;
+};
+
+StructuredBuffer<float4x4> vertices_list;
+RWStructuredBuffer<int> cells_overlapped;
+
+float4 grid_origin;
+float4 grid_size;
+uint num_tris;
+
+[numthreads(32,1,1)]
+void cells_counting (CS_INPUT input)
+{
+	if (input.DTid.x < num_tris)
+	{
+		//get the vertices
+		float4x4 tris = vertices_list[input.DTid.x];
+		float3 v0 = tris[0].xyz;
+		float3 v1 = tris[1].xyz;
+		float3 v2 = tris[2].xyz;
+
+		//find the aabb min and max
+		float3 aabb_min = min(min(v0, v1), v2);
+		float3 aabb_max = max(max(v0, v1), v2);
+
+		//transform the min and max to cell indices
+		int3 min_cell_index = floor((aabb_min - grid_origin.xyz) * grid_size.xyz);
+		int3 max_cell_index = floor((aabb_max - grid_origin.xyz) * grid_size.xyz);
+
+		//count the overlapped cells
+		int3 cells_count = int3(1, 1, 1) + (max_cell_index - min_cell_index);
+		cells_overlapped[input.DTid.x] = cells_count.x * cells_count.y * cells_count.z;
+	}
+}
+
+StructuredBuffer<int> prefix_sum_result;
+RWStructuredBuffer<int2> cell_tris_pair_buffer;
+uint num_pairs;
+uint num_cells_x; //TODO: check if instead of three uint, i can use a float3 
+uint num_cells_y;
+
+[numthreads(32, 1, 1)]
+void cells_overlapping(CS_INPUT input)
+{
+	if (input.DTid.x < num_tris)
+	{
+		//get the vertices
+		float4x4 tris = vertices_list[input.DTid.x];
+		float3 v0 = tris[0].xyz;
+		float3 v1 = tris[1].xyz;
+		float3 v2 = tris[2].xyz;
+
+		//find the aabb min and max
+		float3 aabb_min = min(min(v0, v1), v2);
+		float3 aabb_max = max(max(v0, v1), v2);
+
+		//transform the min and max to cell indices
+		int3 min_cell_index = floor((aabb_min - grid_origin.xyz) * grid_size.xyz);
+		int3 max_cell_index = floor((aabb_max - grid_origin.xyz) * grid_size.xyz);
+
+		//get the start index in the pairs buffer
+		int start_offset = prefix_sum_result[input.DTid.x];
+		int local_offset = 0;
+
+		for (int z = min_cell_index.z; z <= max_cell_index.z; ++z)
+		{
+			for (int y = min_cell_index.y; y <= max_cell_index.y; ++y)
+			{
+				for (int x = min_cell_index.x; x <= max_cell_index.x; ++x)
+				{
+					int flat_cell_index = x + y * num_cells_x + z * num_cells_x *  num_cells_y;
+					cell_tris_pair_buffer[start_offset + local_offset] = uint2(input.DTid.x, flat_cell_index);
+					local_offset++;
+				}
+			}
+		}
+	}
+}

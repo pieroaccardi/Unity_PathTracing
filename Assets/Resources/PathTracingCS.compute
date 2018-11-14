@@ -1,0 +1,232 @@
+﻿#pragma enable_d3d11_debug_symbols 
+
+#pragma kernel PathTrace_uniform_grid
+
+#include "Utils.cginc"
+
+RWTexture2D<float4> output;
+
+//scene data
+StructuredBuffer<float4x4> triangle_list;
+StructuredBuffer<uint2> grid_data;
+StructuredBuffer<uint> index_list;
+int num_tris;
+
+float3 grid_min;
+float3 grid_max;
+
+float4 grid_origin;
+float4 grid_size;
+uint num_cells_x;
+uint num_cells_y;
+uint num_cells_z;
+
+//camera data
+float4x4 worldspace_frustum_corners;
+float4 screen_size;
+float4 camera_position;
+
+int start_seed;
+
+struct CS_INPUT
+{
+	uint3 Gid : SV_GroupID;
+	uint3 GTid : SV_GroupThreadID;
+	uint3 DTid : SV_DispatchThreadID;
+	uint GI : SV_GroupIndex;
+};
+
+bool SceneIntersection(Ray ray, out float3 position, out float3 normal)
+{
+	//3D DDA
+
+	bool ris = false;
+	float3 p;
+
+	//TODO: try to remove the following branch
+
+	//check if ray origin is inside the voxel grid
+	if (point_inside_box(ray.origin, grid_min, grid_max))
+	{
+		p = ray.origin;
+	}
+	else  //the origin is not in the grid, check if the ray intersects the grid
+	{
+		float tmin, tmax;
+		float3 aabb[2] = { grid_min, grid_max };
+
+		ray_box_intersection(ray, aabb, tmin, tmax);
+
+		if (tmin > tmax)  //no scene intersection
+		{
+			return false;
+		}
+		else
+		{
+			p = ray.origin + tmin * ray.direction;
+		}
+	}
+
+	float3 local_grid_p = (p - grid_origin) * grid_size;
+	local_grid_p = min(local_grid_p, float3(num_cells_x, num_cells_y, num_cells_z) - 0.001);
+	local_grid_p = max(local_grid_p, float3(0, 0, 0) + 0.001);
+
+	int3 voxel = (int3)(floor(local_grid_p) + 0.001);
+	uint flat_index = voxel.x + voxel.y * num_cells_x + voxel.z * num_cells_x * num_cells_y;
+
+	//now find tmax and delta
+	int3 step_dir = int3(ray.direction.x > 0 ? 1 : -1, ray.direction.y > 0 ? 1 : -1, ray.direction.z > 0 ? 1 : -1);
+	float3 inv_dir = 1.0 / ray.direction;
+	float3 cell_size = 1.0 / grid_size;
+	float3 tmp = frac(local_grid_p) + (1 - 2 * frac(local_grid_p)) * (step_dir + 1) * 0.5;
+	float3 tMax = tmp * abs(inv_dir) * cell_size;
+	float3 delta = abs(inv_dir) * cell_size;
+
+	bool intersected = false;
+
+	float t = 0;
+	float3 b;  //b are the barycentric coordinates of the intersection, i use them to compute the weighted normal
+
+	//voxel marching
+	//TODO: implement optimizations from Kai Xiao 2012
+	while (voxel.x < num_cells_x && voxel.x >= 0 && voxel.y < num_cells_y && voxel.y >= 0 && voxel.z < num_cells_z && voxel.z >= 0)
+	{
+		flat_index = voxel.x + voxel.y * num_cells_x + voxel.z * num_cells_x * num_cells_y;
+
+		uint start_offset = grid_data[flat_index].x;
+		uint num_tris = grid_data[flat_index].y;
+
+		float min_t = 999999;
+		float3 min_b;
+		float min_tris_index;
+
+		//search for triangle intersection
+		for (int j = start_offset; j < start_offset + num_tris; ++j)
+		{
+			uint tris_index = index_list[j];
+			float4x4 tri = triangle_list[tris_index];
+
+			if (ray_triangle_intersection(ray, tri, t, b))
+			{
+				//TODO: should check if the intersection is inside the current voxel
+
+				if (t < min_t)
+				{
+					min_t = t;
+					min_b = b;
+					min_tris_index = tris_index;
+				}
+
+				intersected = true;
+			}
+		}
+
+		if (intersected)
+		{
+			position = ray.origin + min_t * ray.direction;
+
+			float4x4 tri = triangle_list[min_tris_index];
+			bool z1_positive = fmod(tri._m23, 2) == 1;
+			bool z2_positive = fmod(tri._m23, 4) >= 2;
+			bool z3_positive = fmod(tri._m23, 8) >= 4;
+			float3 n0 = float3(tri._m30, tri._m31, sqrt(1.0001 - tri._m30 * tri._m30 - tri._m31 * tri._m31) * (z1_positive ? 1 : -1));
+			float3 n1 = float3(tri._m32, tri._m33, sqrt(1.0001 - tri._m32 * tri._m32 - tri._m33 * tri._m33) * (z2_positive ? 1 : -1));
+			float3 n2 = float3(tri._m03, tri._m13, sqrt(1.0001 - tri._m03 * tri._m03 - tri._m13 * tri._m13) * (z3_positive ? 1 : -1));
+			normal = (n0 * min_b.x + n1 * min_b.y + n2 * min_b.z);
+
+			ris = true;
+			break;
+		}
+		
+		//go to the next voxel on the ray
+		if (tMax.x < tMax.y)
+		{
+			if (tMax.x < tMax.z)
+			{
+				tMax.x += delta.x;
+				voxel.x += step_dir.x;
+			}
+			else
+			{
+				tMax.z += delta.z;
+				voxel.z += step_dir.z;
+			}
+		}
+		else
+		{
+			if (tMax.y < tMax.z)
+			{
+				tMax.y += delta.y;
+				voxel.y += step_dir.y;
+			}
+			else
+			{
+				tMax.z += delta.z;
+				voxel.z += step_dir.z;
+			}
+		}
+	}
+
+	return ris;
+}
+
+static const int NUM_BOUNCES = 3;
+
+[numthreads(8, 8, 1)]
+void PathTrace_uniform_grid(CS_INPUT input)
+{
+	if (input.DTid.x < screen_size.x && input.DTid.y < screen_size.y)
+	{
+		//compute view ray
+		float2 uv = float2(input.DTid.xy) / (screen_size.xy - 1);
+		float3 eye_dir = lerp(lerp(worldspace_frustum_corners[0], worldspace_frustum_corners[1], uv.y), lerp(worldspace_frustum_corners[2], worldspace_frustum_corners[3], uv.y), uv.x);
+		eye_dir = normalize(eye_dir);
+
+		Ray ray = MakeRay(camera_position.xyz, eye_dir);
+
+		float3 intersection_position;
+		float3 intersection_normal;
+
+		float weight = 1;
+		float3 L = float3(0, 0, 0);
+
+		//random initial seed using thread id
+		uint seed = wang_hash(input.DTid.x + input.DTid.y * screen_size.x + start_seed);
+
+		for (int bounce = 0; bounce < NUM_BOUNCES; ++bounce)
+		{
+			if (SceneIntersection(ray, intersection_position, intersection_normal))
+			{
+				L += 0 * weight;  //in place of 0 i have to put the emissive value of the material
+
+				//generate new ray according to the intersected surface normal
+				seed = rand_xorshift(seed);
+				float u = seed * (1.0 / 4294967296.0);
+				seed = rand_xorshift(seed);
+				float v = seed * (1.0 / 4294967296.0);
+
+				float3 new_ray = HemisphereSample(u, v, intersection_normal);
+				weight *= saturate(dot(intersection_normal, new_ray));
+
+				ray.origin = intersection_position + intersection_normal * 0.01;
+				ray.direction = new_ray;
+			}
+			else
+			{
+				L += float3(1.5, 1.5, 1.5) * weight;  //float3(1.5, 1.5, 1.5) is the temporary skybox value
+				
+				if (bounce == 0)
+					L = float3(0, 0, 0);
+
+				break;
+			}
+		}
+
+		float4 ris = output[input.DTid.xy];
+		float num_samples = ris.a;
+		L = 1.0 / (num_samples + 1) * (num_samples * ris.rgb + L);
+		ris = float4(L, num_samples + 1);
+		
+		output[input.DTid.xy] = ris;
+	}
+}
