@@ -1,6 +1,6 @@
 ﻿# Unity Editor GPU Path Tracing
 <p align="center">
-  <img src="screen.jpg" title="banner">
+  <img src="screenshot.jpg" title="banner">
 </p>
 
 ## Overview
