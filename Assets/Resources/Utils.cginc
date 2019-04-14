@@ -50,8 +50,19 @@ void ray_box_intersection(in Ray ray, in float3 aabb[2], out float tmin, out flo
 	tmax = min(min(tmax, tymax), tzmax);
 }
 
+float3 GetNormal(float4x4 tri, float3 b)
+{
+	bool z1_positive = fmod(tri._m23, 2) == 1;
+	bool z2_positive = fmod(tri._m23, 4) >= 2;
+	bool z3_positive = fmod(tri._m23, 8) >= 4;
+	float3 n0 = float3(tri._m30, tri._m31, sqrt(1.0001 - tri._m30 * tri._m30 - tri._m31 * tri._m31) * (z1_positive ? 1 : -1));
+	float3 n1 = float3(tri._m32, tri._m33, sqrt(1.0001 - tri._m32 * tri._m32 - tri._m33 * tri._m33) * (z2_positive ? 1 : -1));
+	float3 n2 = float3(tri._m03, tri._m13, sqrt(1.0001 - tri._m03 * tri._m03 - tri._m13 * tri._m13) * (z3_positive ? 1 : -1));
+	return (n0 * b.x + n1 * b.y + n2 * b.z);
+}
+
 //taken from "gpu-based techniques for global illumination effects"
-bool ray_triangle_intersection(in Ray ray, float3x3 tri, out float t, out float3 b)
+bool ray_triangle_intersection(in Ray ray, float4x4 tri, out float t, out float3 b)
 {
 	bool ris = false;
 	float3 qPrime = tri[0] + tri[1] + tri[2];
@@ -68,6 +79,14 @@ bool ray_triangle_intersection(in Ray ray, float3x3 tri, out float t, out float3
 		{
 			ris = true;
 		}
+	}
+	
+	//backface culling
+	if (ris)
+	{
+		float3 normal = GetNormal(tri, b);
+		float p = dot(normal, ray.direction);
+		ris = (p < 0) ? true : false;
 	}
 
 	return ris;
