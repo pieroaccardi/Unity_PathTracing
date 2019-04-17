@@ -108,16 +108,21 @@ bool SceneIntersection(Ray ray, out float3 position, out float3 normal)
 
 			if (ray_triangle_intersection(ray, tri, t, b))
 			{
-				//TODO: should check if the intersection is inside the current voxel
-
-				if (t < min_t)
+				//check if the intersection is inside the current voxel
+				float3 tmp_position = ray.origin + t * ray.direction;
+				float3 tmp_local_p = (tmp_position - grid_origin) * grid_size;
+				int3 intersection_voxel = (int3)(floor(tmp_local_p));
+				if (intersection_voxel.x == voxel.x && intersection_voxel.y == voxel.y && intersection_voxel.z == voxel.z)
 				{
-					min_t = t;
-					min_b = b;
-					min_tris_index = tris_index;
-				}
+					if (t < min_t)
+					{
+						min_t = t;
+						min_b = b;
+						min_tris_index = tris_index;
+					}
 
-				intersected = true;
+					intersected = true;
+				}
 			}
 		}
 
